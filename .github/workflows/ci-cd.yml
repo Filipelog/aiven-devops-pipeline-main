@@ -71,10 +71,10 @@ jobs:
       - name: Build e push
         uses: docker/build-push-action@v5
         with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: |
+        context: .
+        file: ./Dockerfile
+        push: true
+        tags: |
           ghcr.io/filipelog/aiven-devops-pipeline-main/dashboard-app:latest
           ghcr.io/filipelog/aiven-devops-pipeline-main/dashboard-app:${{ github.sha }}
 
