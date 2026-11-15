@@ -18,13 +18,12 @@ provider "aiven" {
 
 resource "aiven_pg" "dashboard_db" {
   project                 = var.aiven_project
-  cloud_name              = "google-us-east1"
+  cloud_name              = "aws-us-east-1"
   plan                    = "free-1-1gb"
   service_name            = var.service_name
   maintenance_window_dow  = "sunday"
   maintenance_window_time = "03:00:00"
 }
-
 resource "aiven_pg_database" "dashboard" {
   project       = var.aiven_project
   service_name  = aiven_pg.dashboard_db.service_name
