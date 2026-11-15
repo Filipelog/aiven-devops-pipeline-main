@@ -5,7 +5,7 @@ lá via cache batch: este próprio app busca dados novos na API do BCB quando
 o cache está velho (ver refresh_stale_series abaixo).
 
 Variáveis de ambiente esperadas (ver .env.example):
-a
+
   AIVEN_DB_URL   -> string de conexão fornecida pela Aiven
   PORT           -> porta HTTP (default 8080)
   CACHE_HOURS    -> horas antes de buscar dados novos na API (default 6)
@@ -160,3 +160,6 @@ if __name__ == "__main__":
     refresh_stale_series()
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
+
+
+# teste pipeline ci/cd
