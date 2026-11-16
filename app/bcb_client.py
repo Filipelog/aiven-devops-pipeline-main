@@ -108,13 +108,13 @@ def fetch_series_from_bcb(series_code: int, n: int = POINTS_PER_SERIES):
     campo_api = mapa_campos[series_code]
 
     params = {
-        "latitude": LATITUDE,
-        "longitude": LONGITUDE,
-        "daily": campo_api,
-        "past_days": n,
-        "forecast_days": 1,
-        "timezone": "America/Bahia",
-    }
+    "latitude": LATITUDE,
+    "longitude": LONGITUDE,
+    "daily": campo_api,
+    "past_days": n,
+    "forecast_days": 1,
+    "timezone": "auto",
+}
 
     resp = requests.get(OPEN_METEO_URL, params=params, timeout=10)
     resp.raise_for_status()
