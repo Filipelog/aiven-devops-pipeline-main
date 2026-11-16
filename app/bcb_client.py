@@ -93,6 +93,35 @@ def init_db():
             raise
 
 
+_meteo_cache = {"timestamp": 0.0, "data": None}
+
+
+def _get_open_meteo_daily(n: int):
+    """Faz uma única requisição à Open-Meteo trazendo todas as variáveis de uma vez
+    e guarda em memória por 60s para evitar múltiplas chamadas seguidas."""
+    import time
+    now = time.time()
+    if _meteo_cache["data"] is not None and (now - _meteo_cache["timestamp"]) < 60:
+        return _meteo_cache["data"]
+
+    params = {
+        "latitude": LATITUDE,
+        "longitude": LONGITUDE,
+        "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max",
+        "past_days": n,
+        "forecast_days": 1,
+        "timezone": "auto",
+    }
+
+    resp = requests.get(OPEN_METEO_URL, params=params, timeout=25)
+    resp.raise_for_status()
+    data = resp.json()
+
+    _meteo_cache["data"] = data
+    _meteo_cache["timestamp"] = now
+    return data
+
+
 def fetch_series_from_bcb(series_code: int, n: int = POINTS_PER_SERIES):
     """Busca os últimos N dias de dados climáticos reais na Open-Meteo."""
     mapa_campos = {
@@ -106,19 +135,7 @@ def fetch_series_from_bcb(series_code: int, n: int = POINTS_PER_SERIES):
         raise ValueError(f"Código de série não mapeado para Open-Meteo: {series_code}")
 
     campo_api = mapa_campos[series_code]
-
-    params = {
-    "latitude": LATITUDE,
-    "longitude": LONGITUDE,
-    "daily": campo_api,
-    "past_days": n,
-    "forecast_days": 1,
-    "timezone": "auto",
-}
-
-    resp = requests.get(OPEN_METEO_URL, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
+    data = _get_open_meteo_daily(n)
 
     datas = data.get("daily", {}).get("time", [])
     valores = data.get("daily", {}).get(campo_api, [])
