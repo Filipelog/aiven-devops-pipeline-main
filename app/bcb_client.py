@@ -1,10 +1,10 @@
 """
 Módulo compartilhado: conexão com o Postgres da Aiven e leitura da API
 de dados abertos meteorológicos Open-Meteo (https://api.open-meteo.com).
-Usado por app.py — concentra a lógica de acesso a dados num único módulo.
 """
 
 import os
+import time
 import datetime
 from contextlib import contextmanager
 import psycopg2
@@ -15,11 +15,10 @@ import requests
 DB_URL = os.environ.get("AIVEN_DB_URL")
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
-# Coordenadas de Salvador, BA (pode alterar para qualquer cidade)
+# Coordenadas de Salvador, BA
 LATITUDE = -12.9714
 LONGITUDE = -38.5014
 
-# Séries meteorológicas mapeadas para a Open-Meteo — dados abertos, sem chave de API.
 SERIES = {
     101: {"name": "Temperatura Máxima Diária (Salvador)", "unit": "°C", "casas": 1},
     102: {"name": "Temperatura Mínima Diária (Salvador)", "unit": "°C", "casas": 1},
@@ -29,6 +28,7 @@ SERIES = {
 POINTS_PER_SERIES = 30
 
 _pool = None
+_meteo_cache = {"timestamp": 0.0, "data": None}
 
 
 def _get_pool():
@@ -49,7 +49,6 @@ def _get_pool():
 
 @contextmanager
 def get_connection():
-    """Pega uma conexão emprestada do pool e devolve ao sair do bloco `with`."""
     conn = _get_pool().getconn()
     try:
         yield conn
@@ -61,13 +60,12 @@ def get_connection():
 
 
 def init_db():
-    """Cria as tabelas caso ainda não existam."""
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS meteo_series (
+                    CREATE TABLE IF NOT EXISTS bcb_series (
                         series_code INTEGER NOT NULL,
                         ref_date    DATE NOT NULL,
                         value       NUMERIC NOT NULL,
@@ -93,13 +91,7 @@ def init_db():
             raise
 
 
-_meteo_cache = {"timestamp": 0.0, "data": None}
-
-
 def _get_open_meteo_daily(n: int):
-    """Faz uma única requisição à Open-Meteo trazendo todas as variáveis de uma vez
-    e guarda em memória por 60s para evitar múltiplas chamadas seguidas."""
-    import time
     now = time.time()
     if _meteo_cache["data"] is not None and (now - _meteo_cache["timestamp"]) < 60:
         return _meteo_cache["data"]
@@ -123,7 +115,6 @@ def _get_open_meteo_daily(n: int):
 
 
 def fetch_series_from_bcb(series_code: int, n: int = POINTS_PER_SERIES):
-    """Busca os últimos N dias de dados climáticos reais na Open-Meteo."""
     mapa_campos = {
         101: "temperature_2m_max",
         102: "temperature_2m_min",
@@ -150,13 +141,12 @@ def fetch_series_from_bcb(series_code: int, n: int = POINTS_PER_SERIES):
 
 
 def upsert_series(series_code: int, points: list):
-    """Grava (ou atualiza) pontos de uma série direto no Postgres."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             for p in points:
                 cur.execute(
                     """
-                    INSERT INTO meteo_series (series_code, ref_date, value, fetched_at)
+                    INSERT INTO bcb_series (series_code, ref_date, value, fetched_at)
                     VALUES (%s, %s, %s, now())
                     ON CONFLICT (series_code, ref_date)
                     DO UPDATE SET value = EXCLUDED.value, fetched_at = now();
