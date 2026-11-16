@@ -1,7 +1,7 @@
 """
 Módulo compartilhado: conexão com o Postgres da Aiven e leitura da API
-de dados abertos do Banco Central (SGS). Usado por app.py — concentra a lógica
-de acesso a dados num único módulo.
+de dados abertos meteorológicos Open-Meteo (https://api.open-meteo.com).
+Usado por app.py — concentra a lógica de acesso a dados num único módulo.
 """
 
 import os
@@ -13,22 +13,21 @@ from psycopg2.extras import RealDictCursor
 import requests
 
 DB_URL = os.environ.get("AIVEN_DB_URL")
+OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
-# Séries do SGS/BCB — dados abertos, sem autenticação.
-# Referência completa de códigos: https://www3.bcb.gov.br/sgspub
+# Coordenadas de Salvador, BA (pode alterar para qualquer cidade)
+LATITUDE = -12.9714
+LONGITUDE = -38.5014
+
+# Séries meteorológicas mapeadas para a Open-Meteo — dados abertos, sem chave de API.
 SERIES = {
-    1:   {"name": "Dólar comercial (venda)", "unit": "R$", "casas": 4},
-    432: {"name": "Meta Selic definida pelo Copom", "unit": "% a.a.", "casas": 2},
-    433: {"name": "IPCA - variação mensal", "unit": "%", "casas": 2},
+    101: {"name": "Temperatura Máxima Diária (Salvador)", "unit": "°C", "casas": 1},
+    102: {"name": "Temperatura Mínima Diária (Salvador)", "unit": "°C", "casas": 1},
+    103: {"name": "Precipitação Acumulada (Salvador)", "unit": "mm", "casas": 1},
+    104: {"name": "Velocidade Máxima do Vento (Salvador)", "unit": "km/h", "casas": 1},
 }
 POINTS_PER_SERIES = 30
 
-# Pool de conexões: a Aiven fica em outra região/rede que o Render, então
-# abrir uma conexão nova (TCP + handshake SSL) custa ~1s toda vez. Uma
-# única página do dashboard faz várias consultas (visita, cache de cada
-# série, contagem de acessos...), e abrir uma conexão nova pra cada uma
-# multiplicava esse ~1s por 7-8, deixando a página bem lenta. Com o pool,
-# as conexões são abertas uma vez e reaproveitadas entre requisições.
 _pool = None
 
 
@@ -50,15 +49,11 @@ def _get_pool():
 
 @contextmanager
 def get_connection():
-    """Pega uma conexão emprestada do pool e devolve ao sair do bloco
-    `with` — em vez de abrir/fechar uma conexão física nova toda vez."""
+    """Pega uma conexão emprestada do pool e devolve ao sair do bloco `with`."""
     conn = _get_pool().getconn()
     try:
         yield conn
     except Exception:
-        # Se algo deu errado no meio de uma transação, desfaz antes de
-        # devolver ao pool — senão a próxima requisição que reaproveitar
-        # essa conexão herda uma transação "abortada" e falha em cascata.
         conn.rollback()
         raise
     finally:
@@ -66,23 +61,13 @@ def get_connection():
 
 
 def init_db():
-    """Cria as tabelas caso ainda não existam.
-
-    Em produção, vários workers do gunicorn chamam esta função quase ao
-    mesmo tempo na inicialização. `CREATE TABLE IF NOT EXISTS` não é
-    100% atômico entre transações concorrentes no Postgres, então dois
-    workers podem colidir tentando criar a mesma tabela ao mesmo tempo
-    (erro de "duplicate key" no catálogo interno pg_type). Isso é
-    inofensivo — só significa que outro worker já criou a tabela — então
-    apenas ignoramos esse erro específico em vez de deixar o worker
-    inteiro cair.
-    """
+    """Cria as tabelas caso ainda não existam."""
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS bcb_series (
+                    CREATE TABLE IF NOT EXISTS meteo_series (
                         series_code INTEGER NOT NULL,
                         ref_date    DATE NOT NULL,
                         value       NUMERIC NOT NULL,
@@ -102,54 +87,59 @@ def init_db():
                 )
             conn.commit()
     except psycopg2.errors.DuplicateTable:
-        # Outro worker criou a tabela entre nossa checagem e nosso CREATE.
-        # Tudo bem, o objetivo (tabela existir) já foi alcançado.
         pass
     except psycopg2.errors.UniqueViolation as exc:
-        # Mesma corrida, mas manifestada como conflito no catálogo interno
-        # pg_type em vez de "table already exists". Também inofensivo.
         if "pg_type" not in str(exc):
             raise
 
 
 def fetch_series_from_bcb(series_code: int, n: int = POINTS_PER_SERIES):
-    """Busca os últimos N pontos de uma série no SGS do Banco Central.
-
-    Observação: o endpoint `/dados/ultimos/{n}` da API do BCB está
-    respondendo 400 Bad Request no momento (testado manualmente). Por
-    isso usamos aqui o endpoint padrão com `dataInicial`/`dataFinal`, que
-    funciona normalmente, e pegamos só os últimos N pontos retornados.
-    """
-    days_back = n * 3  # margem folgada: nem todo dia tem valor (fins de semana, feriados etc.)
-    today = datetime.date.today()
-    start = today - datetime.timedelta(days=days_back)
-
-    url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{series_code}/dados"
-    params = {
-        "formato": "json",
-        "dataInicial": start.strftime("%d/%m/%Y"),
-        "dataFinal": today.strftime("%d/%m/%Y"),
+    """Busca os últimos N dias de dados climáticos reais na Open-Meteo."""
+    mapa_campos = {
+        101: "temperature_2m_max",
+        102: "temperature_2m_min",
+        103: "precipitation_sum",
+        104: "wind_speed_10m_max",
     }
-    resp = requests.get(url, params=params, timeout=10)
+
+    if series_code not in mapa_campos:
+        raise ValueError(f"Código de série não mapeado para Open-Meteo: {series_code}")
+
+    campo_api = mapa_campos[series_code]
+
+    params = {
+        "latitude": LATITUDE,
+        "longitude": LONGITUDE,
+        "daily": campo_api,
+        "past_days": n,
+        "forecast_days": 1,
+        "timezone": "America/Bahia",
+    }
+
+    resp = requests.get(OPEN_METEO_URL, params=params, timeout=10)
     resp.raise_for_status()
-    raw = resp.json()  # [{"data": "27/08/2026", "valor": "5.3521"}, ...]
+    data = resp.json()
+
+    datas = data.get("daily", {}).get("time", [])
+    valores = data.get("daily", {}).get(campo_api, [])
 
     parsed = []
-    for item in raw:
-        ref_date = datetime.datetime.strptime(item["data"], "%d/%m/%Y").date()
-        parsed.append({"ref_date": ref_date, "value": float(item["valor"])})
+    for data_str, val in zip(datas, valores):
+        if val is not None:
+            ref_date = datetime.datetime.strptime(data_str, "%Y-%m-%d").date()
+            parsed.append({"ref_date": ref_date, "value": float(val)})
+
     return parsed[-n:]
 
 
 def upsert_series(series_code: int, points: list):
-    """Grava (ou atualiza) pontos de uma série direto no Postgres —
-    usado pelo cache do app.py."""
+    """Grava (ou atualiza) pontos de uma série direto no Postgres."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             for p in points:
                 cur.execute(
                     """
-                    INSERT INTO bcb_series (series_code, ref_date, value, fetched_at)
+                    INSERT INTO meteo_series (series_code, ref_date, value, fetched_at)
                     VALUES (%s, %s, %s, now())
                     ON CONFLICT (series_code, ref_date)
                     DO UPDATE SET value = EXCLUDED.value, fetched_at = now();
